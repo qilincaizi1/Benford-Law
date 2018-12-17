@@ -1,0 +1,245 @@
+---
+title: "Movie_Box_office"
+author: "Tingrui Huang"
+date: "December 14, 2018"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r message=FALSE,include=FALSE}
+# Load packages
+library(tidyverse)
+library(esquisse)
+library(maps)
+library(jsonlite)
+library(kableExtra)
+library(DataExplorer)
+library(magrittr)
+library(benford.analysis)
+library(BenfordTests)
+library(ggpubr)
+library(wordcloud)
+library(RColorBrewer)
+library(tidytext)
+library(reshape2)
+library(lme4)
+library(kableExtra)
+library(plotly)
+library(officer)
+library(readxl)
+```
+
+```{r ,include=FALSE}
+# Load datasets
+movie <- read_csv("tmdb_5000_movies.csv")
+crew <- read_csv("tmdb_5000_credits.csv")
+mv <- movie
+state <- map_data("state")
+state_list <- (distinct(state, region))$region
+```
+
+```{r , echo=FALSE}
+### Data preparation - stage 2
+# JSON to tidy format
+mv_kws <- mv %>% filter(nchar(keywords)>2) %>% mutate(js = lapply(keywords,fromJSON)) %>% 
+  unnest(js) %>% select(id, title, keyword=name)
+mv_gnr <- mv %>% filter(nchar(genres)>2) %>% mutate(js = lapply(genres,fromJSON)) %>%
+  unnest(js) %>% select(id, title, genres=name)
+mv_company <- mv %>% filter(nchar(production_companies)>2) %>% mutate(js = lapply(production_companies,fromJSON)) %>%
+  unnest(js) %>% select(id, title, production_companies=name)
+mv_country <- mv %>% filter(nchar(production_countries)>2) %>% mutate(js = lapply(production_countries,fromJSON)) %>%
+  unnest(js) %>% select(id, title, production_countries=name)
+crew_clean <- crew %>% filter(nchar(crew)>2) %>% mutate(js=lapply(crew,fromJSON)) %>% unnest(js)
+director <- crew_clean %>% filter(job=="Director") %>% mutate(director=name) %>% select(movie_id, director)
+# Add total number of movies by company, country, genre
+mv_gnr %<>% group_by(genres) %>% mutate(total=n()) %>% ungroup()
+mv_company %<>% group_by(production_companies) %>% mutate(total=n()) %>% ungroup()
+mv_country %<>% group_by(production_countries) %>% mutate(total=n()) %>% ungroup()
+# Exclude keywords, genres, company and country from the general dataset
+mv_clean <- mv %>% select(-keywords,-genres, -production_companies, -production_countries, -spoken_languages)
+# Reformat variables
+mv_clean$budget <- as.numeric(mv_clean$budget)
+# Extract released year and month
+mv_clean <- mv_clean %>% mutate(released_year=format(as.Date(release_date, format="%Y/%m/%d"),"%Y"))
+mv_clean <- mv_clean %>% mutate(released_month=format(as.Date(release_date, format="%Y/%m/%d"),"%m"))
+# Reformat
+mv_clean$released_month <- as.numeric(mv_clean$released_month)
+mv_clean$released_year <- as.numeric(mv_clean$released_year)
+```
+
+```{r }
+# Preparation
+movie_slides <- read_pptx("slides_template.pptx")
+# Get the layout
+layout_summary(movie_slides)
+# Set master
+master <- "Default Design"
+layout_properties(x = movie_slides, layout = "Title Slide", master = master )
+```
+
+# Title Slide
+```{r }
+movie_slides %<>% add_slide(layout="Title Slide",master="Ion Boardroom") %>%
+  ph_with_text(type="ctrTitle",str="Benford Law Analysis") %>%
+  ph_with_text(type="subTitle",str="Movie Box Office")
+```
+
+# Slide 1 - Introduction
+```{r }
+movie_slides %<>% add_slide(layout="Title and Content",master="Ion Boardroom") %>%
+  ph_with_text(type="title",str="Introduction") %>%
+  ph_with_ul(type="body", index=1, 
+             str_list = c("In this project, I'm going to do the Benford analysis on movies' budget, revenue, vote average(ratings), vote count. Over the past a few years, a lot of movies are accused to be misreporting their revenue so that they could attract more attention from the public. Meanwhile,lots of production companies are accused to pay for people to write positive reviews to their movies.",
+                           "In the analysis, I will use 2 datasets, the movie dataset and the credit dataset. In the movie dataset, there are 4803 movies with 20 explanatory variables including title, language, released date, budget, revenue, runtime and so on. The credit dataset contains the list of crews and directors for each movie."),
+             level_list = c(1, 1))
+```
+
+# Slide 2 - Benford Analysis on Movie Budget
+```{r }
+movie_slides %<>%
+  add_slide(layout="Title and Content",master="Ion Boardroom") %>%
+  ph_with_text(type="title", str="Benford Analysis on Movie Budget") %>%
+  ph_with_img_at(src="bfd_budget.png",height = 3, width=5,left = 4, top = 4) %>%
+  ph_with_ul(type = "body", index=1, str_list = c("Summary",
+             "In general, movie buget does not follow benford law. There are lots of suspecious values"),
+             level_list =  c(1,2))%>%
+  ph_with_text(type="ftr",str="615 Final Project")
+```
+
+# Slide 3 - Benford Analysis on Movie Revenue
+```{r }
+movie_slides %<>%
+  add_slide(layout="Title and Content",master="Ion Boardroom") %>%
+  ph_with_text(type="title", str="Benford Analysis on Movie Revenue") %>%
+  ph_with_img_at(src="bfd_revenue.png",height = 3, width=5,left = 4, top = 4) %>%
+  ph_with_ul(type = "body", index=1, str_list = c("Summary",
+             "In general, movie revenue follows benford law almost perfectly. However, there is still a few suspecious value, but I think that would be normal."),
+             level_list =  c(1,2))%>%
+  ph_with_text(type="ftr",str="615 Final Project")
+```
+
+# Slide 4 - Benford Analysis on Vote Count
+```{r }
+movie_slides %<>%
+  add_slide(layout="Title and Content",master="Ion Boardroom") %>%
+  ph_with_text(type="title", str="Benford Analysis on Movie Vote Count") %>%
+  ph_with_img_at(src="bfd_votec.png",height = 3, width=5,left = 4, top = 4) %>%
+  ph_with_ul(type = "body", index=1, str_list = c("Summary",
+             "In general, movie revenue follows benford law pretty good. However, there are some suspecious values need to be looked into."),
+             level_list =  c(1,2))%>%
+  ph_with_text(type="ftr",str="615 Final Project")
+```
+
+# Slide 5 - Benford Analysis on Popularity
+```{r }
+movie_slides %<>%
+  add_slide(layout="Title and Content",master="Ion Boardroom") %>%
+  ph_with_text(type="title", str="Benford Analysis on Movie Popularity") %>%
+  ph_with_img_at(src="bfd_pop.png",height = 3, width=5,left = 4, top = 4) %>%
+  ph_with_ul(type = "body", index=1, str_list = c("Summary",
+             "In general, the popularity follows benford law pretty good. However, there are some suspecious values need to be looked into."),
+             level_list =  c(1,2))%>%
+  ph_with_text(type="ftr",str="615 Final Project")
+```
+
+# Slide 6 - Suspecious Revenue by Company
+```{r warning=FALSE}
+bfd.rev <- benford(mv_clean$revenue)
+sus_rev <- getSuspects(bfd.rev, mv_clean)
+sus_rev_com <- left_join(sus_rev,mv_company, by="title") %>% select(production_companies,total) %>% 
+  group_by(production_companies) %>% mutate(count=n()) %>% arrange(desc(count)) %>% 
+  ungroup() %>% na.omit()
+sus_rev_com %<>% group_by(production_companies) %>% unique() %>% ungroup()
+count3 <- sus_rev_com %>% slice(1:15)
+
+com3 <- ggplot(count3,aes(x=reorder(production_companies,-count),y=count))+
+          geom_histogram(stat = "identity", fill="#b2df8a")+ 
+          theme_minimal()+
+          theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+          xlab("Production Company") + ylab("Number of Suspecious Movies") + 
+          ggtitle("Suspecious Revenue by Company")
+
+ratio3 <- sus_rev_com %>% mutate(ratio=count/total) %>% arrange(desc(ratio)) %>% 
+          filter(total>5) %>% slice(1:15)
+com4 <- ggplot(ratio3,aes(x=reorder(production_companies,-ratio),y=ratio))+
+          geom_histogram(stat = "identity", fill="#b2df8a")+ 
+          theme_minimal()+
+          theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+          xlab("Production Company") + ylab("Ratio of Suspecious Movies") + 
+          ggtitle("Suspecious Revenue by Company (Ratio)") 
+
+movie_slides %<>%
+  add_slide(layout="Two Content",master="Ion Boardroom") %>%
+  ph_with_text(type="title", str="Suspecious Revenue by Company") %>%
+  ph_with_gg(type="body", index=1, value=com3) %>%
+  ph_with_gg(type="body",index=2,value=com4) %>%
+  ph_with_text(type="ftr",str="615 Final Project")
+```
+
+# Slide 7 - Suspecious Revenue by Country
+```{r warning=FALSE}
+sus_rev_ctry <- left_join(sus_rev,mv_country, by="title") %>% select(production_countries,total) %>% 
+  group_by(production_countries) %>% mutate(count=n()) %>% arrange(desc(count)) %>% ungroup() %>% na.omit()
+sus_rev_ctry %<>% group_by(production_countries) %>% unique() %>% ungroup()
+count4 <- sus_rev_ctry %>% slice(1:10)
+ctry3 <- ggplot(count4,aes(x=reorder(production_countries,-count),y=count))+
+          geom_histogram(stat = "identity", fill="#b2df8a")+ 
+          theme_minimal()+
+          theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+          xlab("Production Country") + ylab("Number of Suspecious Movies") + 
+          ggtitle("Suspecious Revenue by Country") 
+
+ratio4 <- sus_rev_ctry %>% mutate(ratio=count/total) %>% arrange(desc(ratio)) %>% 
+          filter(total>3) %>% slice(1:10)
+ctry4 <- ggplot(ratio4,aes(x=reorder(production_countries,-ratio),y=ratio))+
+          geom_histogram(stat = "identity", fill="#b2df8a")+ 
+          theme_minimal()+
+          theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+          xlab("Production Country") + ylab("Ratio of Suspecious Movies") + 
+          ggtitle("Suspecious Revenue by Country (Ratio)") 
+
+movie_slides %<>%
+  add_slide(layout="Two Content",master="Ion Boardroom") %>%
+  ph_with_text(type="title", str="Suspecious Revenue by Country") %>%
+  ph_with_gg(type="body", index=1, value=ctry3) %>%
+  ph_with_gg(type="body",index=2,value=ctry4) %>%
+  ph_with_text(type="ftr",str="615 Final Project")
+```
+
+# Slide 8 - Suspecious Revenue by Director
+```{r warning=FALSE}
+sus_rev_dr <- left_join(sus_rev, director, by=c("id"="movie_id")) %>% group_by(director) %>% count() %>%
+          arrange(desc(n)) %>% ungroup() %>% slice(1:15)
+sus.dr2 <- ggplot(sus_rev_dr,aes(x=reorder(director, -n), y=n))+geom_histogram(stat = "identity", fill="#b2df8a")+
+          theme_minimal()+
+          theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+          xlab("Director") + ylab("Number of Suspecious Movies") +
+          ggtitle("Suspecious Revenue by Director")
+
+movie_slides %<>%
+  add_slide(layout="Title and Content",master="Ion Boardroom") %>%
+  ph_with_text(type="title", str="Suspecious Revenue by Director") %>%
+  ph_with_gg(type="body",value=ctry4) %>%
+  ph_with_text(type="ftr",str="615 Final Project")
+```
+
+# Slide 9 - Summary on Suspecious Revenue
+```{r }
+movie_slides %<>% add_slide(layout="Title and Content",master="Ion Boardroom") %>%
+  ph_with_text(type="title",str="Summary on Suspecious Revenue") %>%
+  ph_with_ul(type="body", index=1, 
+             str_list = c("Revenue is one of the statistics that movie production companies often misreport to attract more investors. By taking out the suspecious companies, we can see lots of bignames like Warner Bros, Paramount, New Line and so on. If we re-rank companies by the ratio of suspecious movies over total movies they made, smaller production companies showed up.",
+                           "As the largest movie production contry, not quite suprisingly, the USA has the most suspecious movies in revenue. If we look at the ratio, smaller countries tend to have higher ratio of suspecious movies.",
+                          "It is shocking to see Christopher Nolan on the list since he is one of my favorite directors. Again, this will not be a proof that the directors have cheated on the revenue of their movies."),
+             level_list = c(1, 1, 1))
+```
+
+# Print out
+```{r }
+remove_slide(movie_slides, index=1)
+print(movie_slides, target = "Benford_Law_Slides_Presentation.pptx")
+```
+
