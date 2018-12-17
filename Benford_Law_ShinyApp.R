@@ -132,7 +132,7 @@ ui <- dashboardPage(
              print("In this project, I'm going to do the Benford analysis on movies' budget, revenue, vote average(ratings), vote count. Over the past a few years, a lot of movies are accused to be misreporting their revenue so that they could attract more attention from the public. Meanwhile,lots of production companies are accused to pay for people to write positive reviews to their movies.")
            )
          ),
-         mainPanel(imageOutput("hp_1"))
+         mainPanel(imageOutput("hp1"))
        ),
        # Overview
        tabItem(
@@ -283,8 +283,8 @@ ui <- dashboardPage(
 server <- function(input, output) {
 
    # Home Page
-   output$hp_1<- renderImage({
-     Leg<-"www/hp_1.png"
+   output$hp1<- renderImage({
+     Leg<-"www/hp1.PNG"
      list(src=Leg)
    },deleteFile = FALSE)
    
