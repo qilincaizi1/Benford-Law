@@ -1,0 +1,13 @@
+name: Benford_MovieBoxOffice
+title: Benford_MovieBoxOffice
+username:
+account: zhiyongyici
+server: shinyapps.io
+hostUrl: https://api.shinyapps.io/v1
+appId: 618334
+bundleId: 1767592
+url: https://zhiyongyici.shinyapps.io/Benford_MovieBoxOffice/
+when: 1545016227.80054
+asMultiple: FALSE
+asStatic: FALSE
+ignoredFiles: Benfor_Law_Slides_Presentation.Rmd|Benford_Law_Report.pdf|Benford_Law_Report.Rmd|Benford_Law_Slides_Presentation.pptx|bfd_budget.PNG|bfd_pop.PNG|bfd_revenue.PNG|bfd_votec.PNG|README.md|slides_template.pptx
