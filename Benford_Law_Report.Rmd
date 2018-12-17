@@ -9,3 +9,613 @@ output: pdf_document
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
+
+```{r message=FALSE,include=FALSE}
+# Load packages
+library(tidyverse)
+library(esquisse)
+library(maps)
+library(jsonlite)
+library(kableExtra)
+library(DataExplorer)
+library(magrittr)
+library(benford.analysis)
+library(BenfordTests)
+library(ggpubr)
+library(wordcloud)
+library(RColorBrewer)
+library(tidytext)
+library(reshape2)
+library(lme4)
+library(kableExtra)
+library(plotly)
+```
+
+
+
+```{r ,include=FALSE}
+# Load datasets
+movie <- read_csv("tmdb_5000_movies.csv")
+crew <- read_csv("tmdb_5000_credits.csv")
+mv <- movie
+state <- map_data("state")
+state_list <- (distinct(state, region))$region
+```
+
+# Introduction
+In this project, I'm going to do the Benford analysis on the movies' budget, revenue, vote average(ratings), vote count. In the analysis, I will use 2 datasets, the movie dataset and the credit dataset. In the movie dataset, there are 4803 movies with 20 explanatory variables including title, language, released date, budget, revenue, runtime and so on. The credit dataset contains the list of crews and directors for each movie.
+
+First of all, let's take a look at the missing values in the dataset.
+```{r fig.align = "center", echo=FALSE}
+### Data preparation - stage 1
+# Missing value of the raw data
+plot_missing(movie)
+# We are not going to use overview, homepage and tagline in our analysis
+# exclude those three columns
+mv <- mv %>% select(-tagline,-homepage, -overview)
+plot_missing(mv)
+```
+After looking at the initial missing value plot, I decided to remove the "tagline", "homepage" and "overview", since for now, I'm not going to use these variables and they have too many missing values. In later analysis, I will include "overview" to do the sentiment analysis.
+
+# Data Preparation
+Since the "keyword", "genres", "production company" and "country" are in JSON format, I use a package called "jsonlite" to reformat these variables and subtract these columns from the main table. Since one movie could correspond to multiple keywords and genres, therefore, if I didn't subtract those columns from the main table, they would make the table much longer and create repetitive information.
+
+I added "released year", "released month" and "profit" into the table. And reformatted some variables for later analysis.
+```{r , echo=FALSE}
+### Data preparation - stage 2
+# JSON to tidy format
+mv_kws <- mv %>% filter(nchar(keywords)>2) %>% mutate(js = lapply(keywords,fromJSON)) %>% 
+  unnest(js) %>% select(id, title, keyword=name)
+mv_gnr <- mv %>% filter(nchar(genres)>2) %>% mutate(js = lapply(genres,fromJSON)) %>%
+  unnest(js) %>% select(id, title, genres=name)
+mv_company <- mv %>% filter(nchar(production_companies)>2) %>% mutate(js = lapply(production_companies,fromJSON)) %>%
+  unnest(js) %>% select(id, title, production_companies=name)
+mv_country <- mv %>% filter(nchar(production_countries)>2) %>% mutate(js = lapply(production_countries,fromJSON)) %>%
+  unnest(js) %>% select(id, title, production_countries=name)
+crew_clean <- crew %>% filter(nchar(crew)>2) %>% mutate(js=lapply(crew,fromJSON)) %>% unnest(js)
+director <- crew_clean %>% filter(job=="Director") %>% mutate(director=name) %>% select(movie_id, director)
+# Add total number of movies by company, country, genre
+mv_gnr %<>% group_by(genres) %>% mutate(total=n()) %>% ungroup()
+mv_company %<>% group_by(production_companies) %>% mutate(total=n()) %>% ungroup()
+mv_country %<>% group_by(production_countries) %>% mutate(total=n()) %>% ungroup()
+# Exclude keywords, genres, company and country from the general dataset
+mv_clean <- mv %>% select(-keywords,-genres, -production_companies, -production_countries, -spoken_languages)
+# Reformat variables
+mv_clean$budget <- as.numeric(mv_clean$budget)
+# Extract released year and month
+mv_clean <- mv_clean %>% mutate(released_year=format(as.Date(release_date, format="%Y/%m/%d"),"%Y"))
+mv_clean <- mv_clean %>% mutate(released_month=format(as.Date(release_date, format="%Y/%m/%d"),"%m"))
+# Reformat
+mv_clean$released_month <- as.numeric(mv_clean$released_month)
+mv_clean$released_year <- as.numeric(mv_clean$released_year)
+```
+
+# I. Benford Analysis
+## (i) Overview
+In the Benford analysis, I'm going to find out the suspecious values in "budget", "popularity", "revenue", "runtime", "vote average" and "vote count". Over the past a few years, a lot of movies are accused to be misreporting their revenue so that they could attract more attention from the public. Meanwhile,lots of production companies are accused to pay for people to write positive reviews to their movies. 
+
+Thereore, I think it will be interesting to explore if there is any movie that cheated on its statistics.
+```{r fig.align = "center",fig.width=12, fig.height=6.5}
+# budget
+bfd.budget <- benford(mv_clean$budget)
+plot(bfd.budget)
+# popularity
+bfd.popular <- benford(mv_clean$popularity)
+plot(bfd.popular)
+# revenue
+bfd.rev <- benford(mv_clean$revenue)
+plot(bfd.rev)
+# runtime
+bfd.rt <- benford(mv_clean$runtime)
+plot(bfd.rt)
+# vote average
+bfd.votea <- benford(mv_clean$vote_average)
+plot(bfd.votea)
+# vote count
+bfd.votec <- benford(mv_clean$vote_count)
+plot(bfd.votec)
+```
+\color{blue}Discussion on initial Benford Analysis
+
+As we can see from the plots of Benford Analysis, "budget", "runtime" and "vote average" do not follow Benford distribution. For "runtime", I think the reason is that most movies run between 30 and 60 days, there is only a few movies run less than 10 days or more than 100 days. For "vote average", the scale of vote rating is from 1 to 10, and most people tend to give mediocre scores between 5 to 8, therefore, the average is heavily centered between 5 and 8. However, it is weird to see "budget" does not follow Benford Law, and I think if a production company cheats on the budget of their movies, they could be benefitted by doing that. Therefore, I would like to take a further look at the suspecious values in the "budget".
+
+Based on these facts, I would not say suspecious values are the reason for "runtime" and "vote average" do not follow Benford distribution. But there could be tampering data in "budget".
+
+On the other hand, the plots of "popularity", "revenue" and "vote count" generally follow Benford distribution and only small portion of the data do not follow it. In the following analysis, I will take closer look at the suspecious movies based on the previous Benford analysis. \color{black}
+
+# (ii) Zoom in on each topic
+### Suspecious movies in "budget"
+```{r }
+# Look at chisq first
+chisq(bfd.budget)
+# As we can see, the p-value indicates the distribution of "budget"
+# is not the same as Benford distribution
+```
+```{r warning=FALSE, echo=FALSE, fig.height=3.5}
+# Get the suspecious values in "budget"
+sus_budget <- getSuspects(bfd.budget,mv_clean)
+
+# Join suspecious movies with corresponding company
+sus_bud_com <- left_join(sus_budget,mv_company, by="title") %>% select(production_companies,total) %>% 
+  group_by(production_companies) %>% mutate(count=n()) %>% arrange(desc(count)) %>% 
+  ungroup() %>% na.omit()
+sus_bud_com %<>% group_by(production_companies) %>% unique() %>% ungroup()
+count1 <- sus_bud_com %>% slice(1:15)
+
+com1 <- ggplot(count1,aes(x=reorder(production_companies,-count),y=count))+
+          geom_histogram(stat = "identity", fill="#0c4c8a")+ 
+          theme_minimal()+
+          theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+          xlab("Production Company") + ylab("Number of Suspecious Movies") + 
+          ggtitle("Suspecious Budget by Company") 
+
+ratio1 <- sus_bud_com %>% mutate(ratio=count/total) %>% arrange(desc(ratio)) %>% 
+          filter(total>5) %>% slice(1:15)
+com2 <- ggplot(ratio1,aes(x=reorder(production_companies,-ratio),y=ratio))+
+          geom_histogram(stat = "identity", fill="#0c4c8a")+ 
+          theme_minimal()+
+          theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+          xlab("Production Company") + ylab("Ratio of Suspecious Movies") + 
+          ggtitle("Suspecious Budget by Company (Ratio)") 
+ggarrange(com1, com2)
+
+# Join suspecious movies with corresponding country
+sus_bud_ctry <- left_join(sus_budget,mv_country, by="title") %>% select(production_countries,total) %>% 
+  group_by(production_countries) %>% mutate(count=n()) %>% arrange(desc(count)) %>% ungroup() %>% na.omit()
+sus_bud_ctry %<>% group_by(production_countries) %>% unique() %>% ungroup()
+
+count2 <- sus_bud_ctry %>% slice(1:10)
+ctry1 <- ggplot(count2,aes(x=reorder(production_countries,-count),y=count))+
+          geom_histogram(stat = "identity", fill="#0c4c8a")+ 
+          theme_minimal()+
+          theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+          xlab("Production Country") + ylab("Number of Suspecious Movies") + 
+          ggtitle("Suspecious Budget by Country") 
+
+ratio2 <- sus_bud_ctry %>% mutate(ratio=count/total) %>% arrange(desc(ratio)) %>% 
+          filter(total>3) %>% slice(1:10)
+ctry2 <- ggplot(ratio2,aes(x=reorder(production_countries,-ratio),y=ratio))+
+          geom_histogram(stat = "identity", fill="#0c4c8a")+ 
+          theme_minimal()+
+          theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+          xlab("Production Country") + ylab("Ratio of Suspecious Movies") + 
+          ggtitle("Suspecious Budget by Country (Ratio)") 
+ggarrange(ctry1, ctry2)
+
+# Producers with most suspecious movies
+sus_bud_dr <- left_join(sus_budget, director, by=c("id"="movie_id")) %>% group_by(director) %>% count() %>%
+          arrange(desc(n)) %>% ungroup() %>% slice(1:15)
+sus.dr1 <- ggplot(sus_bud_dr,aes(x=reorder(director, -n), y=n))+geom_histogram(stat = "identity", fill="#0c4c8a")+
+          theme_minimal()+
+          theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+          xlab("Director") + ylab("Number of Suspecious Movies") +
+          ggtitle("Suspecious Budget by Director")
+sus.dr1
+```
+\color{blue}Summary:
+
+As we can see the top 5 companies with most suspecious budgets are all bignames, including Universal Pictures, Paramount, Warner Bros. and so on. However, if we check out the ratio of suspecious movies a company made, smaller production companies popped up. 
+
+As the largest movie production contry, not quite suprisingly, the USA has the most suspecious movies in budget. If we look at the ratio, smaller countries tend to have higher ratio of suspecious movies.
+
+Suprisingly, bigname directors like Woody Allen showed up on the list of director with most suspecious movies in budget. However, I would not say those five movies Woody directed cheated on their budget, since this is only a simple analysis. \color{black}
+
+
+### Suspecious movies in "revenue"
+```{r }
+# Movies with suspecious revenue
+chisq(bfd.rev)
+# As we can see, the p-value indicates the distribution of "revenue"
+# is the same as Benford distribution
+```
+```{r warning=FALSE, echo=FALSE, fig.height=3.5}
+# Get the suspecious values in "revenue"
+sus_rev <- getSuspects(bfd.rev, mv_clean)
+
+# Join suspecious movies with corresponding company
+sus_rev_com <- left_join(sus_rev,mv_company, by="title") %>% select(production_companies,total) %>% 
+  group_by(production_companies) %>% mutate(count=n()) %>% arrange(desc(count)) %>% 
+  ungroup() %>% na.omit()
+sus_rev_com %<>% group_by(production_companies) %>% unique() %>% ungroup()
+count3 <- sus_rev_com %>% slice(1:15)
+
+com3 <- ggplot(count3,aes(x=reorder(production_companies,-count),y=count))+
+          geom_histogram(stat = "identity", fill="#b2df8a")+ 
+          theme_minimal()+
+          theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+          xlab("Production Company") + ylab("Number of Suspecious Movies") + 
+          ggtitle("Suspecious Revenue by Company")
+
+ratio3 <- sus_rev_com %>% mutate(ratio=count/total) %>% arrange(desc(ratio)) %>% 
+          filter(total>5) %>% slice(1:15)
+com4 <- ggplot(ratio3,aes(x=reorder(production_companies,-ratio),y=ratio))+
+          geom_histogram(stat = "identity", fill="#b2df8a")+ 
+          theme_minimal()+
+          theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+          xlab("Production Company") + ylab("Ratio of Suspecious Movies") + 
+          ggtitle("Suspecious Revenue by Company (Ratio)") 
+ggarrange(com3, com4)
+
+# Join suspecious movies with corresponding country
+sus_rev_ctry <- left_join(sus_rev,mv_country, by="title") %>% select(production_countries,total) %>% 
+  group_by(production_countries) %>% mutate(count=n()) %>% arrange(desc(count)) %>% ungroup() %>% na.omit()
+sus_rev_ctry %<>% group_by(production_countries) %>% unique() %>% ungroup()
+
+count4 <- sus_rev_ctry %>% slice(1:10)
+ctry3 <- ggplot(count4,aes(x=reorder(production_countries,-count),y=count))+
+          geom_histogram(stat = "identity", fill="#b2df8a")+ 
+          theme_minimal()+
+          theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+          xlab("Production Country") + ylab("Number of Suspecious Movies") + 
+          ggtitle("Suspecious Revenue by Country") 
+
+ratio4 <- sus_rev_ctry %>% mutate(ratio=count/total) %>% arrange(desc(ratio)) %>% 
+          filter(total>3) %>% slice(1:10)
+ctry4 <- ggplot(ratio4,aes(x=reorder(production_countries,-ratio),y=ratio))+
+          geom_histogram(stat = "identity", fill="#b2df8a")+ 
+          theme_minimal()+
+          theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+          xlab("Production Country") + ylab("Ratio of Suspecious Movies") + 
+          ggtitle("Suspecious Revenue by Country (Ratio)") 
+ggarrange(ctry3, ctry4)
+
+# Producers with most suspecious movies
+sus_rev_dr <- left_join(sus_rev, director, by=c("id"="movie_id")) %>% group_by(director) %>% count() %>%
+          arrange(desc(n)) %>% ungroup() %>% slice(1:15)
+sus.dr2 <- ggplot(sus_rev_dr,aes(x=reorder(director, -n), y=n))+geom_histogram(stat = "identity", fill="#b2df8a")+
+          theme_minimal()+
+          theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+          xlab("Director") + ylab("Number of Suspecious Movies") +
+          ggtitle("Suspecious Revenue by Director")
+sus.dr2
+```
+\color{blue}Summary:
+
+Revenue is one of the statistics that movie production companies often misreport to attract more investors. By taking out the suspecious companies, just like what we have seen in the budget analysis, we can see lots of bignames like Warner Bros, Paramount, New Line and so on. Again, ranking companies by the ratio of suspecious movies over total movies they made, smaller production companies showed up. But the list of smaller companies is different from the list in the budget analysis.
+
+Again, the USA surpasses other competitors by huge amount, and small countries have higher ratio of suspecious movies.
+
+It is shocking to see Christopher Nolan on the list since he is one of my favorite directors. Again, this will not be a proof that the directors have cheated on the revenue of their movies.\color{black}
+
+### Suspecious movies in "vote count"
+```{r }
+# Movies with suspecious vote count
+chisq(bfd.votec)
+# As we can see, the p-value indicates the distribution of "vote count"
+# is the not same as Benford distribution
+```
+```{r warning=FALSE, echo=FALSE, fig.height=3.5}
+# Get the suspecious values in "vote count"
+sus_votec <- getSuspects(bfd.votec, mv_clean)
+
+# Join suspecious movies with corresponding company
+sus_vote_com <- left_join(sus_votec,mv_company, by="title") %>% select(production_companies,total) %>% 
+  group_by(production_companies) %>% mutate(count=n()) %>% arrange(desc(count)) %>% 
+  ungroup() %>% na.omit()
+sus_vote_com %<>% group_by(production_companies) %>% unique() %>% ungroup()
+count5 <- sus_vote_com %>% slice(1:15)
+
+com5 <- ggplot(count5,aes(x=reorder(production_companies,-count),y=count))+
+          geom_histogram(stat = "identity", fill="#ef3b2c")+ 
+          theme_minimal()+
+          theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+          xlab("Production Company") + ylab("Number of Suspecious Movies") + 
+          ggtitle("Suspecious Vote Count by Company")
+
+ratio5 <- sus_vote_com %>% mutate(ratio=count/total) %>% arrange(desc(ratio)) %>% 
+          filter(total>5) %>% slice(1:15)
+com6 <- ggplot(ratio5,aes(x=reorder(production_companies,-ratio),y=ratio))+
+          geom_histogram(stat = "identity", fill="#ef3b2c")+ 
+          theme_minimal()+
+          theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+          xlab("Production Company") + ylab("Ratio of Suspecious Movies") + 
+          ggtitle("Suspecious Vote Count by Company (Ratio)") 
+ggarrange(com5, com6)
+
+# Join suspecious movies with corresponding country
+sus_vote_ctry <- left_join(sus_votec,mv_country, by="title") %>% select(production_countries,total) %>% 
+  group_by(production_countries) %>% mutate(count=n()) %>% arrange(desc(count)) %>% ungroup() %>% na.omit()
+sus_vote_ctry %<>% group_by(production_countries) %>% unique() %>% ungroup()
+
+count6 <- sus_vote_ctry %>% slice(1:10)
+ctry5 <- ggplot(count6,aes(x=reorder(production_countries,-count),y=count))+
+          geom_histogram(stat = "identity", fill="#ef3b2c")+ 
+          theme_minimal()+
+          theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+          xlab("Production Country") + ylab("Number of Suspecious Movies") + 
+          ggtitle("Suspecious Vote Count by Country") 
+
+ratio6 <- sus_vote_ctry %>% mutate(ratio=count/total) %>% arrange(desc(ratio)) %>% 
+          filter(total>3) %>% slice(1:10)
+ctry6 <- ggplot(ratio6,aes(x=reorder(production_countries,-ratio),y=ratio))+
+          geom_histogram(stat = "identity", fill="#ef3b2c")+ 
+          theme_minimal()+
+          theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+          xlab("Production Country") + ylab("Ratio of Suspecious Movies") + 
+          ggtitle("Suspecious Vote Count by Country (Ratio)") 
+ggarrange(ctry5, ctry6)
+
+# Producers with most suspecious movies
+sus_vote_dr <- left_join(sus_votec, director, by=c("id"="movie_id")) %>% group_by(director) %>% count() %>%
+          arrange(desc(n)) %>% ungroup() %>% na.omit() %>% slice(1:15)
+sus.dr3 <- ggplot(sus_vote_dr,aes(x=reorder(director, -n), y=n))+geom_histogram(stat = "identity", fill="#ef3b2c")+
+          theme_minimal()+
+          theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+          xlab("Director") + ylab("Number of Suspecious Movies") +
+          ggtitle("Suspecious Vote Count by Director")
+sus.dr3
+```
+\color{blue}Summary:
+
+The vote count is the number of people that give ratings to a movie. Some movies have been suffering the scandal of buying voters to boost their ratings. In my analysis, the big movie companies such as Warner Bros., Columbia Picture, New Line Cinema and so on have lots of movies with suspecious vote count. If we look at the ratio, smaller companies showed up.
+
+Surprisingly, some of the South Korea and Japan are on the list of ratio of suspecious movies. Since both of these two countries have respectful movie industry.
+
+Again, we see Woody Allen's name at the top of the suspecious movie list, and we can find another famous movie director Steven Spielberg on the list too.\color{black}
+
+### Suspecious movies in "popularity"
+```{r }
+# Movies with suspecious popularity
+chisq(bfd.popular)
+# As we can see, the p-value indicates the distribution of "vote count"
+# is the not same as Benford distribution
+```
+```{r warning=FALSE, echo=FALSE, fig.height=3.5}
+# Get the suspecious values in "popularity"
+sus_pop <- getSuspects(bfd.popular,mv_clean)
+
+# Join suspecious movies with corresponding company
+sus_pop_com <- left_join(sus_pop,mv_company, by="title") %>% select(production_companies,total) %>% 
+  group_by(production_companies) %>% mutate(count=n()) %>% arrange(desc(count)) %>% 
+  ungroup() %>% na.omit()
+sus_pop_com %<>% group_by(production_companies) %>% unique() %>% ungroup()
+count7 <- sus_pop_com %>% slice(1:15)
+
+com7 <- ggplot(count7,aes(x=reorder(production_companies,-count),y=count))+
+          geom_histogram(stat = "identity", fill="#9c179e")+ 
+          theme_minimal()+
+          theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+          xlab("Production Company") + ylab("Number of Suspecious Movies") + 
+          ggtitle("Suspecious Popularity by Company")
+
+ratio7 <- sus_pop_com %>% mutate(ratio=count/total) %>% arrange(desc(ratio)) %>% 
+          filter(total>5) %>% slice(1:15)
+com8 <- ggplot(ratio7,aes(x=reorder(production_companies,-ratio),y=ratio))+
+          geom_histogram(stat = "identity", fill="#9c179e")+ 
+          theme_minimal()+
+          theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+          xlab("Production Company") + ylab("Ratio of Suspecious Movies") + 
+          ggtitle("Suspecious Popularity by Company (Ratio)") 
+ggarrange(com7, com8)
+
+# Join suspecious movies with corresponding country
+sus_pop_ctry <- left_join(sus_pop,mv_country, by="title") %>% select(production_countries,total) %>% 
+  group_by(production_countries) %>% mutate(count=n()) %>% arrange(desc(count)) %>% ungroup() %>% na.omit()
+sus_pop_ctry %<>% group_by(production_countries) %>% unique() %>% ungroup()
+
+count8 <- sus_pop_ctry %>% slice(1:10)
+ctry7 <- ggplot(count8,aes(x=reorder(production_countries,-count),y=count))+
+          geom_histogram(stat = "identity", fill="#9c179e")+ 
+          theme_minimal()+
+          theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+          xlab("Production Country") + ylab("Number of Suspecious Movies") + 
+          ggtitle("Suspecious Popularity by Country") 
+
+ratio8 <- sus_pop_ctry %>% mutate(ratio=count/total) %>% arrange(desc(ratio)) %>% 
+          filter(total>3) %>% slice(1:10)
+ctry8 <- ggplot(ratio8,aes(x=reorder(production_countries,-ratio),y=ratio))+
+          geom_histogram(stat = "identity", fill="#9c179e")+ 
+          theme_minimal()+
+          theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+          xlab("Production Country") + ylab("Ratio of Suspecious Movies") + 
+          ggtitle("Suspecious Popularity by Country (Ratio)") 
+ggarrange(ctry7, ctry8)
+
+# Producers with most suspecious movies
+sus_pop_dr <- left_join(sus_pop, director, by=c("id"="movie_id")) %>% group_by(director) %>% count() %>%
+          arrange(desc(n)) %>% ungroup() %>% na.omit() %>% slice(1:15)
+sus.dr4 <- ggplot(sus_pop_dr,aes(x=reorder(director, -n), y=n))+geom_histogram(stat = "identity", fill="#9c179e")+
+          theme_minimal()+
+          theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+          xlab("Director") + ylab("Number of Suspecious Movies") +
+          ggtitle("Suspecious Popularity by Director")
+sus.dr4
+```
+\color{blue}Summary:
+
+Popularity is a score that indicates how popular a movie is. The predictors that are used to calculate popularity include # of votes for the day, # of views for the day, # of total votes, # of users who marked the movie as "favorite" and previous day score.
+
+Since popularity is a score of the combination of many factors, I would say it is difficult to tell whether the value is suspecious. Even if we could tell the suspecious values, we do not have the method to decomposite the score and find out the suspecious part. 
+
+The results from the plots look similar to previous analysis.\color{black}
+
+# II. Text Mining
+## (i) Wordcloud 
+### Genre (all years)
+```{r fig.align = "center", warning=FALSE, echo=FALSE, fig.height=3.5}
+wc_gnr <- mv_gnr %>% group_by(genres) %>% count() %>% arrange(desc(n))
+wordcloud(words = wc_gnr$genres, freq = wc_gnr$n,colors = brewer.pal(n=12, name = "Paired"))
+```
+\color{blue} As we can see from the wordcloud, the most frequent genres in these 4,800 movies are Drama, Comedy, Thriller and Action. \color{black}
+
+### Genre (2015-2017)
+Now, let's look at the most popular genres from 2010, and I guess the result might be different from the result of all time.
+```{r fig.align = "center", warning=FALSE, echo=FALSE,  fig.height=3.5}
+mv_clean_2010 <- mv_clean %>% filter(released_year>=2010) %>% select(id)
+wc_gnr2010 <- left_join(mv_clean_2010, mv_gnr, by="id") %>% group_by(genres) %>% count() %>% arrange(desc(n)) %>%
+              na.omit()
+wordcloud(words = wc_gnr2010$genres, freq = wc_gnr2010$n,colors = brewer.pal(n=12, name = "Paired"))
+```
+\color{blue} Surprisingly, the result looks quite similar to the previous result, the most popular genres are Drama and Comedy, following by Thriller and Action movies. \color{black}
+
+### Keywords (all years)
+```{r fig.align = "center", echo=FALSE, fig.height=3.5}
+wc_kws <- mv_kws %>% group_by(keyword) %>% count() %>% arrange(desc(n))
+wordcloud(words = wc_kws$keyword, freq = wc_kws$n,  max.words = 100, 
+          scale = c(2.5,.2), min.freq = 3,random.order = FALSE, rot.per = .15, 
+          colors = brewer.pal(n=8, name = "Dark2"))
+```
+\color{blue} As we can see, the most popular keywords overall are "woman director", "independent filt", "during credits stinger", "based on novel" and so on.\color{black}
+
+### Keywords (top 300 in revenue)
+Now let's look at the popular keywords for the movies that have highest revenue. Let's see if we can find any patterns here!
+```{r fig.align = "center", echo=FALSE, fig.height=3.5}
+mv_clean_t300 <- mv_clean %>% arrange(desc(revenue)) %>% slice(1:300) %>% select(id)
+wc_kws_t300 <- left_join(mv_clean_t300, mv_kws, by="id") %>%  group_by(keyword) %>% count() %>% arrange(desc(n))
+wordcloud(words = wc_kws_t300$keyword, freq = wc_kws_t300$n,  max.words = 100, 
+          scale = c(2.5,.2), min.freq = 3,random.order = FALSE, rot.per = .15, 
+          colors = brewer.pal(n=8, name = "Dark2"))
+```
+\color{blue} Here we can see some difference. While "during credits stinger" is still a popular keyword, we also see many new keywords showed up, such as "3d", "super hero", "alien", "magic", "saving the world" and so on. In current movie industry, I believe super hero movies are really popular and making lots of money. If you are going to make films or invest in production compnies, target on these! \color{black}
+
+## (ii) Sentiment Analysis
+### Keywords - lexicon choice: "nrc"
+The reason I chose "nrc" was because this lexicon has more sentimental levels/categories than the other two lexicons, and in the movie dataset, the keywords contains more than just negative or positive sentiments.
+```{r fig.align = "center", echo=FALSE,message=FALSE, fig.height=3.5}
+kws_nrc <- mv_kws %>% select(keyword) %>% rename(word=keyword) %>% inner_join(get_sentiments("nrc")) %>% 
+            count(word,sentiment, sort = TRUE)
+ggplot(kws_nrc, aes(x=reorder(sentiment,-n),y=n)) + geom_histogram(stat = "identity", fill="#0c4c8a")+ 
+          theme_minimal()+
+          xlab("Sentiments") + ylab("Number of Words") + 
+          ggtitle("Count of Words") 
+```
+\color{blue} As we can see, the top four sentiments are "negative", "fear", "positive" and "anger". Let's dive into these four categories to see what words are included in them. \color{black}
+
+```{r fig.align = "center", echo=FALSE,message=FALSE}
+kws_nrc_t4 <- kws_nrc %>% filter(sentiment==c("negative","fear","positive","anger"))
+kws_nrc_t4 %>% acast(word~sentiment, value.var = "n", fill = 0) %>%
+              comparison.cloud(colors = brewer.pal(n=4,"Dark2"), max.words = 100, scale = c(2.5,.5))
+```
+
+### Overview (assign sentiment score to each movie) - lexicon choice: "afinn" 
+The variable "overview" contains the brief introduction of each movie, and I will assign each movie a sentiment score based on the sentiment analysis on its overview.
+```{r fig.align = "center", echo=FALSE,message=FALSE, fig.height=3.5}
+overview <- movie %>% select(id, overview)
+ovv_tidy <- overview %>% unnest_tokens(word, overview) %>% anti_join(stop_words)
+ovv_afinn <- ovv_tidy %>% inner_join(get_sentiments("afinn")) %>% group_by(id) %>% 
+              summarise(sentiment=sum(score)) %>% left_join(mv_clean, by="id") %>%
+              select(id, title, budget, popularity, revenue, vote_average, vote_count, sentiment)
+# Distribution
+ggplot(data = ovv_afinn) + aes(x = sentiment) + 
+          geom_histogram(aes(y=..density..), bins = 50, fill="gray") +
+          geom_density(adjust = 0.7, fill = "#9ecae1", alpha= 0.5,color="#9ecae1") +
+          labs(title = "Distribution of Sentiment Scores", y = "Number of Movies") +
+          theme_minimal()
+```
+\color{blue} As we can see, most movies have a sentiment score between -7 and 7. Now, let's find out if the sentiment scores will have effects on movies' budget, popularity, revenue, vote average and vote count.\color{black}
+
+```{r echo=FALSE,message=FALSE, fig.height=3.5}
+ovv_afinn_gnr <- left_join(ovv_afinn, mv_gnr, by="id") %>% select(-total)
+sent1 <- ggplot(ovv_afinn_gnr, aes(x=sentiment, y=log(budget+1)))+geom_point()+
+            stat_smooth(method = "lm")+labs(title="Sentiment Score and Budget", y="Budget in Logarithm")+
+            theme_minimal()
+sent2 <- ggplot(ovv_afinn_gnr, aes(x=sentiment, y=log(revenue+1)))+geom_point()+
+            stat_smooth(method = "lm")+labs(title="Sentiment Score and Revenue", y="Revenue in Logarithm")+
+            theme_minimal()
+sent3 <- ggplot(ovv_afinn_gnr, aes(x=sentiment, y=vote_average,color=genres))+geom_point()+
+            stat_smooth(method = "lm", se=FALSE)+labs(title="Sentiment Score and Vote Average", y="Vote Average")+
+            theme_minimal()
+sent4 <- ggplot(ovv_afinn_gnr, aes(x=sentiment, y=vote_count,color=genres))+geom_point()+
+            stat_smooth(method = "lm", se=FALSE)+labs(title="Sentiment Score and Vote Count", y="Vote Count")+
+            theme_minimal()
+sent5 <- ggplot(ovv_afinn_gnr, aes(x=sentiment, y=popularity,color=genres))+geom_point()+
+            stat_smooth(method = "lm", se=FALSE)+labs(title="Sentiment Score and Popularity", y="Popularity")+
+            theme_minimal()
+sent_cor <- ovv_afinn %>% select(-id, -title)
+sent6 <- ggcorrplot::ggcorrplot(cor(sent_cor))
+ggarrange(sent1, sent2)
+ggarrange(sent3, sent4,common.legend = TRUE, legend="bottom")
+ggarrange(sent5, sent6, legend="bottom")
+```
+\color{blue}As we can see from the plots, in general, there is not much correlation between sentiment scores and other factors. However, from the correlation test, we do see some correlation between each of the factors. So, let's make a simple multilevel model to see if we could predict revenue by using these factors.\color{black}
+
+$$y_{logRevenue} \sim N(2.893+0.728X_{logBudget}+0.633X_{scaledPopularity}+0.731X_{scaledVoteAverage}+0.957X_{scaledVoteCount}+0.08X_{scaledSentiment}+u_{j[i]}, 5.49^2)$$
+
+$$u_{j[i]} \sim N(0,0.22^2)$$
+```{r fig.align = "center",echo=FALSE,message=FALSE, fig.height=3.5}
+df <- ovv_afinn_gnr %>% select(id, sentiment, genres) %>% unique() %>% left_join(mv_clean, by="id")
+set.seed(2018)
+index <- sample(nrow(df),size = 7500,replace = FALSE)
+train <-  df[index,]
+test <- df[-index,]
+reg1 <- lmer(log(revenue+1)~log(budget+1)+scale(popularity)+
+               scale(vote_average)+scale(vote_count)+scale(sentiment)+(1|genres), data = train)
+summary(reg1)
+plot(reg1)
+prediction <- predict(reg1, newdata=test, allow.new.levels=TRUE)
+plot(x=prediction, y=log(test$revenue+1))+abline(0,1, col="red")
+```
+\color{blue} From the residual plot we can tell that the model does not fit the data well. In the prediction, for none zero values, the model tends to under predict the revenue for most movies. For zero values, the model tends to over predict the revenue. Overall, I would say the model does not do a good job in both fiting and predicting.\color{black}
+
+# III. Maps
+## State map - extract state names from keywords of all movies
+Let's see the most popular state in all movies.
+```{r fig.align = "center",echo=FALSE,message=FALSE}
+top_state <- mv_kws %>% filter(keyword %in% state_list) %>% group_by(keyword) %>% 
+              summarise(count=n()) %>%  mutate(state_name=keyword) %>%
+              right_join(tibble(state_name=state_list), by="state_name") %>%
+              select(state_name, count) %>% mutate(count=ifelse(is.na(count),0,count)) %>% arrange(desc(count))
+top_state <- left_join(state, top_state, by=c("region"="state_name"))
+ggplot(data = top_state) + geom_polygon(aes(x = long, y = lat, fill = count, group = group), color = "white")+
+        coord_fixed(1.3) + ggtitle("Most Popular States")
+```
+
+
+# IV. General EDA
+## (i) Overall trend of number of movies
+```{r fig.align = "center",echo=FALSE,message=FALSE, fig.height=3.5}
+trend_mv <- mv_clean %>% select(original_title, released_year) %>% filter(released_year!=2017)
+trend_mv <- trend_mv %>% group_by(released_year) %>% summarise(count=n())
+trend_mv <- na.omit(trend_mv)
+ggplot(trend_mv, aes(x=released_year, y=count))+geom_point(col="red")+geom_line(col="blue")+
+        theme_minimal()+ggtitle("Number of Movies by Year")
+```
+
+## (ii) Vote Average and Vote Count by Genre
+```{r echo=FALSE,message=FALSE, fig.height=3.5}
+vag <- mv_clean %>% select(id, vote_average, vote_count, popularity, revenue, budget) %>% 
+        left_join(mv_gnr, by="id") %>% select(-total) %>% na.omit()
+vagplot1 <- ggplot(vag, aes(x=reorder(genres,-vote_average), y=vote_average))+geom_boxplot()+
+            theme_minimal()+
+            theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+            xlab("Genres") + ylab("Vote Average") +
+            ggtitle("Vote Average by Genres")
+vagplot2 <- ggplot(vag, aes(x=reorder(genres,-vote_count), y=log(vote_count+1)))+geom_boxplot()+
+            theme_minimal()+
+            theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+            xlab("Genres") + ylab("Vote Count") +
+            ggtitle("Vote Count by Genres")
+ggarrange(vagplot1,vagplot2)
+```
+\color{blue} Summary:
+
+As we can see, the medians of vote average of each genre are kind of on the same level, except for TV Movies. In the vote count plot, foreign movies has the lowest median and quantiles comparing with other genres.\color{black}
+
+## (iii) Movies with highest revenue and vote count
+```{r fig.align = "center",echo=FALSE,message=FALSE, fig.height=4}
+options(scipen = 999)
+mv_clean %>% arrange(desc(revenue)) %>% slice(1:20) %>%
+      ggplot(aes(x=reorder(original_title, -revenue), y=revenue)) + 
+      geom_bar(stat = "identity", fill="#0c4c8a") + theme_minimal() +
+      theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+      xlab("Movie") + ylab("Revenue") +
+      ggtitle("Movies with Highest Revenue") +
+      geom_text(aes(label=vote_average), size=4, vjust=-0.3 ,col="red")
+mv_clean %>% arrange(desc(vote_count)) %>% slice(1:20) %>%
+      ggplot(aes(x=reorder(original_title, -vote_count), y=vote_count)) + 
+      geom_bar(stat = "identity", fill="#0c4c8a") + theme_minimal() +
+      theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+      xlab("Movie") + ylab("Vote Count") +
+      ggtitle("Movies with Highest Vote Count") +
+      geom_text(aes(label=vote_average), size=4, vjust=-0.3 ,col="red")
+```
+
+## (iv) See more details in ShinyApp!
+
+
+
+
+
+
+
+
