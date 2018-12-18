@@ -18,6 +18,10 @@ library(tidytext)
 library(reshape2)
 library(kableExtra)
 library(plotly)
+library(leaflet)
+library(sp)
+library(rgdal)
+library(htmltools)
 ############################################################
 timeoutSeconds <- 3000
 #### Dataset ##############################################
@@ -97,6 +101,18 @@ mapdf <- left_join(mapdf, maptemp, by=c("production_countries","released_year"))
 mapdf <- left_join(world, mapdf, by=c("region"="production_countries")) %>% select(-subregion)
 mapdf[is.na(mapdf)] <- 0
 mapdf %<>% filter(released_year!=0)
+# Interactive map
+mapdf2 <- mv_country %>% select(id, production_countries) %>% left_join(mv_clean, by="id")
+mapdf2 %<>% select(id, production_countries) %>% na.omit()
+mapdf2 <- left_join(mapdf2, sus_budget2,by="id")
+mapdf2 <- left_join(mapdf2, sus_rev2, by="id")
+mapdf2 <- left_join(mapdf2,sus_votec2,by="id")
+mapdf2[is.na(mapdf2)] <- 0
+mapdf2 %<>% group_by(production_countries) %>% mutate(suspecious=sum(sus_bud,sus_rv,sus_vote)) %>%
+  ungroup() %>% select(-id,-sus_bud,-sus_rv,-sus_vote) %>% unique()
+maptemp2 <- mv_country %>% group_by(production_countries) %>% count() %>% 
+  ungroup() %>% rename(total=n)
+mapdf2 <- left_join(mapdf2, maptemp2, by="production_countries")
 #######################################################################
 
 #### ShinyApp ##########################################################
@@ -116,7 +132,9 @@ ui <- dashboardPage(
        menuItem("Text Analysis", tabName = "ta", icon = icon("text-width",lib = "glyphicon"),
                 menuItem("Genre and Keywords", tabName = "gk", icon = icon("th",lib = "glyphicon")),
                 menuItem("Sentiment Analysis", tabName = "sa", icon = icon("heart-empty",lib = "glyphicon"))),
-       menuItem("Map", tabName = "map", icon = icon("map-marker",lib = "glyphicon")),
+       menuItem("Map", tabName = "map", icon = icon("map-marker",lib = "glyphicon"),
+                menuItem("Static - View by Year", tabName = "map1", icon = icon("leaf",lib = "glyphicon")),
+                menuItem("Interactive", tabName = "map2", icon = icon("fire",lib = "glyphicon"))),
        menuItem("Other EDA", tabName = "eda", icon = icon("picture",lib = "glyphicon"))
      )
    ),
@@ -236,14 +254,14 @@ ui <- dashboardPage(
            )
          )
        ),
-       # Map
+       # Map1
        tabItem(
-         tabName = "map",
+         tabName = "map1",
          fluidRow(
            column(12,
            box(
-             title = "Total / Suspecious Movies by Country",status = "danger", solidHeader = TRUE,
-             plotOutput("themap"), height = 600, width = 12
+             title = "Static Map - View by Year",status = "danger", solidHeader = TRUE,
+             plotOutput("themap"), height = 500, width = 12
            )
          )),
          fluidRow(
@@ -259,6 +277,22 @@ ui <- dashboardPage(
            box(title = "Select To Year",status = "danger", solidHeader = TRUE,
                sliderInput("mapbyyear2","to", min = min(mapdf$released_year), 
                            max = max(mapdf$released_year), value = 1990))
+         )
+       ),
+       # Map2
+       tabItem(
+         tabName = "map2",
+         fluidRow(
+           column(12,
+                  box(
+                    title = "Interactive Map",status = "danger", solidHeader = TRUE,
+                    leafletOutput("themap2"), height = 500, width = 12
+                  )
+           )),
+         fluidRow(
+           box(title = "Statistics", status = "danger", solidHeader = TRUE,
+               selectInput("selectstat2","Total or Suspecious",choices = c("Total Number of Movies",
+                                                                          "Number of Suspecious Movies")))
          )
        ),
        # Other EDA
@@ -453,6 +487,78 @@ server <- function(input, output) {
       } else {
         ggplot(maptp)+geom_polygon(aes(x=long,y=lat,group=group,fill=suspecious_mv))+coord_quickmap()+
           scale_fill_gradient(low = "pink", high="red")+theme_minimal()
+        
+      }
+    })
+    
+    # Map2
+    output$themap2 <- renderLeaflet({
+      url <- "https://www.naturalearthdata.com/http//www.naturalearthdata.com/download/50m/cultural/ne_50m_admin_0_countries.zip"
+      tmp <- tempdir()
+      file <- basename(url)
+      download.file(url,file)
+      unzip(file,exdir = tmp)
+      # Load data
+      country_spatial <- readOGR(dsn = tmp, layer = "ne_50m_admin_0_countries", encoding = "UTF-8")
+      # Get country name
+      cname <- country_spatial@data[["NAME"]]
+      data <- sp::merge(country_spatial,mapdf2,by.x="NAME",by.y="production_countries",sort=FALSE,duplicateGeoms=FALSE,all.x=FALSE)
+      labels <- sprintf(
+        "<strong>%s</strong><br/>%s Total Number of Movies<br/>%g Suspecious Movies",
+        data$NAME_EN, data$total, data$suspecious
+      ) %>% lapply(htmltools::HTML)
+      
+      # Leaflet
+      m <- leaflet(data) %>% addTiles() %>% setView(55,3.4,1.5)
+      if (input$selectstat2=="Total Number of Movies"){
+        pal <- colorNumeric("Greens", domain = mapdf2$total)
+        m_total <- m %>% addPolygons(
+          fillColor = ~pal(data$total),
+          weight = 2,
+          opacity = 1,
+          color = "white",
+          dashArray = "3",
+          fillOpacity = 0.7,
+          highlight = highlightOptions(
+            weight = 5,
+            color = "#666",
+            dashArray = "",
+            fillOpacity = 0.7,
+            bringToFront = TRUE),
+          label = labels,
+          labelOptions = labelOptions(
+            style = list("font-weight" = "normal", padding = "3px 8px"),
+            textsize = "15px",
+            direction = "auto")
+        ) %>%
+          addLegend(pal = pal, values = ~total, opacity = 0.7, title = "Total Number of Movies",
+                    position = "bottomright")
+        m_total
+        
+      } else {
+        pal <- colorNumeric("Reds", domain = mapdf2$suspecious)
+        m_sus <- m %>% addPolygons(
+          fillColor = ~pal(data$suspecious),
+          weight = 2,
+          opacity = 1,
+          color = "white",
+          dashArray = "3",
+          fillOpacity = 0.7,
+          highlight = highlightOptions(
+            weight = 5,
+            color = "#666",
+            dashArray = "",
+            fillOpacity = 0.7,
+            bringToFront = TRUE),
+          label = labels,
+          labelOptions = labelOptions(
+            style = list("font-weight" = "normal", padding = "3px 8px"),
+            textsize = "15px",
+            direction = "auto")
+        ) %>%
+          addLegend(pal = pal, values = ~suspecious, opacity = 0.7, title = "Total Number of Movies",
+                    position = "bottomright")
+        m_sus
         
       }
     })
